@@ -1,76 +1,6 @@
-import math
 import datetime
 
-from dateutil.parser import parse
 import polars as pl
-
-
-def diff_rate(
-    new_count: int,
-    old_count: int,
-) -> float | None:
-    """Calculate the custom difference rate: log_{1.01}(new_count / old_count)"""
-    if old_count <= 0 or new_count <= 0:
-        return None
-    return math.log(new_count / old_count) / math.log(1.01)
-
-
-def get_tag_trend(
-    all_df: pl.DataFrame,
-    tag: str,
-    new_date=None,
-    old_date=None,
-):
-    """
-    Get count and difference rate for a tag between two dates.
-    If dates are None, uses the latest and previous day available.
-    """
-    tag_df = all_df.filter(pl.col("tagname") == tag)
-
-    if tag_df.is_empty():
-        print(f"Tag '{tag}' not found in dataset.")
-        return None
-
-    if new_date is None:
-        new_date = tag_df["date"].max()
-    if old_date is None:
-        available_dates = tag_df["date"].sort().to_list()
-        idx = available_dates.index(new_date)
-        old_date = available_dates[idx - 1] if idx > 0 else None
-
-    if old_date is None:
-        print("Not enough historical data for comparison.")
-        return None
-
-    try:
-        new_date = (
-            parse(str(new_date)).date()
-            if not isinstance(new_date, datetime.date)
-            else new_date
-        )
-        old_date = (
-            parse(str(old_date)).date()
-            if not isinstance(old_date, datetime.date)
-            else old_date
-        )
-    except Exception:
-        print("Invalid date format.")
-        return None
-
-    new_count = tag_df.filter(pl.col("date") == new_date)["count"].item()
-    old_count = tag_df.filter(pl.col("date") == old_date)["count"].item()
-
-    rate = diff_rate(new_count, old_count)
-
-    return {
-        "tag": tag,
-        "old_date": old_date,
-        "old_count": old_count,
-        "new_date": new_date,
-        "new_count": new_count,
-        "diff_rate": rate,
-        "growth_factor": new_count / old_count if old_count > 0 else None,
-    }
 
 
 def top_trending_tags(
@@ -92,15 +22,22 @@ def top_trending_tags(
 
     recent = all_df.filter(pl.col("date").is_in([from_date, to_date]))
 
-    pivoted = recent.pivot(
-        index="tagname", on="date", values="count", aggregate_function="first"
-    ).rename({str(from_date): "old_count", str(to_date): "new_count"})
+    try:
+        pivoted = recent.pivot(
+            index="tagname", on="date", values="count", aggregate_function="first"
+        ).rename({str(from_date): "old_count", str(to_date): "new_count"})
+    except pl.exceptions.ColumnNotFoundError:
+        raise
 
     result = pivoted.with_columns(
         pl.when(pl.col("old_count") > 0)
         .then(pl.col("new_count") / pl.col("old_count"))
         .otherwise(None)
-        .log(1.01)
+        .sub(1)
+        .mul(100)
+        .round(3)
+        .cast(pl.String)
+        .add("%")
         .alias("diff_rate")
     ).filter(pl.col("diff_rate").is_not_null())
 
@@ -115,6 +52,7 @@ with open("mapping.csv", "r", encoding="utf-8") as f:
 all_df = (
     pl.scan_parquet("e_hentai_tag_counts.parquet")
     .filter(pl.col("tagname").str.starts_with("location:").not_())
+    .filter(pl.col("tagname").str.starts_with("other:").not_())
     # manual fix: incorrect master tag
     .with_columns(
         pl.col("tagname")
@@ -133,13 +71,20 @@ try:
 except Exception:
     translation = None
 
-for threshold in [100, 500, 1000, 5000, 10000, 50000]:
-    df = top_trending_tags(
-        all_df.filter(pl.col("count").gt(threshold)).collect(),
-        n=20,
-        from_date=datetime.date(year=2025, month=12, day=1),
-    )
-    if translation is not None:
-        df = df.join(translation, on="tagname", how="left")
-        df = df.with_columns(pl.col("translation").fill_null("<无>"))
-    print(df)
+for prefix in ["female:", "male:", "parody:", "artist"]:
+    print(f"----- {prefix} -----")
+    for threshold in [100, 500, 1000, 10000, 50000]:
+        try:
+            df = top_trending_tags(
+                all_df.filter(pl.col("tagname").str.starts_with(prefix))
+                .filter(pl.col("count").gt(threshold))
+                .collect(),
+                n=20,
+                from_date=datetime.date(year=2025, month=12, day=1),
+            )
+        except Exception:
+            break
+        if translation is not None:
+            df = df.join(translation, on="tagname", how="left")
+            df = df.with_columns(pl.col("translation").fill_null("<无>"))
+        print(df)
