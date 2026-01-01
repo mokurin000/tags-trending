@@ -107,14 +107,20 @@ def top_trending_tags(
     return result.sort("diff_rate", descending=True).head(n)
 
 
+with open("mapping.csv", "r", encoding="utf-8") as f:
+    lines = f.read().strip().split("\n")
+    pairs = [line.split(",") for line in lines if line]
+    mapping = {left: right for left, right in pairs}
+
 all_df = (
     pl.scan_parquet("e_hentai_tag_counts.parquet")
     .filter(pl.col("tagname").str.starts_with("location:").not_())
     # manual fix: incorrect master tag
     .with_columns(
         pl.col("tagname")
-        .replace("female:female solo", "female:sole female")
-        .replace("female:animal ears", "female:kemonomimi")
+        .replace(mapping)
+        # manual fix: e-hentai tag that not get fixed
+        .replace("male:netori", "male:minotaur")
     )
 )
 
