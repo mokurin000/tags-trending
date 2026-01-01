@@ -36,8 +36,6 @@ def top_trending_tags(
         .sub(1)
         .mul(100)
         .round(3)
-        .cast(pl.String)
-        .add("%")
         .alias("diff_rate")
     ).filter(pl.col("diff_rate").is_not_null())
 
